@@ -1,6 +1,8 @@
-use crate::{transport::transport_trait::Transport, packet::{Packet, self}};
+use crate::{
+    packet::{self, Packet},
+    transport::transport_trait::Transport,
+};
 use crc::{Crc, CRC_32_CKSUM};
-use thiserror::Error;
 use std::{
     collections::HashMap,
     io::{self, Cursor, Error, ErrorKind},
@@ -8,32 +10,6 @@ use std::{
 };
 
 use byteorder::{LittleEndian, ReadBytesExt};
-
-// #[derive(Error)]
-// struct NetworkPacketErr {
-
-// }
-
-enum PacketTypes {
-    // Fragment = 0b00,
-    Unreliable = 0b01,
-    Reliable = 0b10,
-    Ordered = 0b11,
-}
-
-impl TryFrom<u8> for PacketTypes {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            // 0 => Ok(Self::Fragment),
-            1 => Ok(Self::Unreliable),
-            2 => Ok(Self::Reliable),
-            3 => Ok(Self::Ordered),
-            _ => Err("Could not convert u8 to PacketType"),
-        }
-    }
-}
 
 pub struct ConnectionManager<T: Transport> {
     open_connections: HashMap<SocketAddr, Connection>,
@@ -68,22 +44,20 @@ impl Connection {
         }
     }
 
-    fn handle_incomming(&mut self, rx: &[u8], packet_hash: u32) {
-        let mut cursor = Cursor::new(rx);
-        let standard_header = StandardHeader::with_checksum(cursor, packet_hash);
-        if standard_header.is_err() {
-            return;
-        }
-
-        let standard_header = standard_header.unwrap();
-        let packet_type = standard_header.packet_type;
-    
-        // match packet_type {
-        //     // PacketTypes::Orderedj //     // PacketTypes::Fragment {
-        //     // }
+    fn handle_incomming(&mut self, rx: &[u8], protocol_version: u64) {
+        // let mut cursor = Cursor::new(rx);
+        // let standard_header = StandardHeader::with_checksum(cursor, packet_hash);
+        // if standard_header.is_err() {
+        //     return;
         // }
-    
 
+        // let standard_header = standard_header.unwrap();
+        // let packet_type = standard_header.packet_type;
+
+        // // match packet_type {
+        // //     // PacketTypes::Orderedj //     // PacketTypes::Fragment {
+        // //     // }
+        // // }
     }
 }
 
@@ -92,12 +66,12 @@ impl Connection {
 
 const CRC_32: Crc<u32> = Crc::<u32>::new(&CRC_32_CKSUM);
 impl<T: Transport> ConnectionManager<T> {
-    fn calculate_hash(&self, recieved: &[u8]) -> u32 {
-        let mut digest = CRC_32.digest();
-        digest.update(&self.proto_version.to_le_bytes());
-        digest.update(recieved);
-        digest.finalize()
-    }
+    // fn calculate_hash(&self, recieved: &[u8]) -> u32 {
+    //     let mut digest = CRC_32.digest();
+    //     digest.update(&self.proto_version.to_le_bytes());
+    //     digest.update(recieved);
+    //     digest.finalize()
+    // }
 
     pub fn start_polling(&mut self) {
         const MAX_BUFFER_SIZE_BYTES: usize = 2000;
@@ -111,53 +85,51 @@ impl<T: Transport> ConnectionManager<T> {
 
             let (n_bytes, from) = result.expect("Could not recieve read bytes.");
             let rx_buff = &rx_buff[..n_bytes];
-            let acctual_hash = self.calculate_hash(rx_buff);
 
             let connection = self
                 .open_connections
                 .entry(from.clone())
                 .or_insert_with(|| Connection::new(from.clone()));
 
-            connection.handle_incomming(rx_buff, acctual_hash);
+            connection.handle_incomming(rx_buff, self.proto_version);
         }
     }
 }
 
-struct FragmentHeader {
-    total_fragments: u8,
-    fragment_id: u8,
-}
+// struct FragmentHeader {
+//     total_fragments: u8,
+//     fragment_id: u8,
+// }
 
-struct StandardHeader {
-    packet_type: PacketTypes,
-    is_fragment: bool,
-}
+// struct StandardHeader {
+//     packet_type: PacketTypes,
+//     is_fragment: bool,
+// }
 
+// impl StandardHeader {
+//     fn with_checksum(mut cursor: Cursor<&[u8]>, real_checksum: u32) -> io::Result<Self> {
+//         let checksum = cursor.read_u32::<LittleEndian>()?;
 
-impl StandardHeader {
-    fn with_checksum(mut cursor: Cursor<&[u8]>, real_checksum: u32) -> io::Result<Self> {
-        let checksum = cursor.read_u32::<LittleEndian>()?;
+//         if real_checksum != checksum {
+//             Err(Error::new(ErrorKind::Other, "Bad checksum"))?;
+//         }
 
-        if real_checksum != checksum {
-            Err(Error::new(ErrorKind::Other, "Bad checksum"))?;
-        }
+//         // Todo remove unwrap
+//         // let packet_type = PacketTypes::try_from(cursor.read_u8()?).unwrap();
+//         // let is_fragment= cursor.read_u8()? as bool;
+//         let is_fragment = cursor.read_u8()? != 0;
 
-        // Todo remove unwrap
-        // let packet_type = PacketTypes::try_from(cursor.read_u8()?).unwrap();
-        // let is_fragment= cursor.read_u8()? as bool;
-        let is_fragment = cursor.read_u8()? != 0;
+//         let packet_type = PacketTypes::try_from(cursor.read_u8()?)
+//             .map_err(|e| Error::new(ErrorKind::Other, "Bad packettype"))?;
 
-        let packet_type = PacketTypes::try_from(cursor.read_u8()?)
-            .map_err(|e| Error::new(ErrorKind::Other, "Bad packettype"))?;
+//         // if let Err(e) = packet_type {}
+//         // .map_err(|e| Err(Error::new(ErrorKind::Other, "Bad packet type")))?;
 
-        // if let Err(e) = packet_type {}
-        // .map_err(|e| Err(Error::new(ErrorKind::Other, "Bad packet type")))?;
+//         Ok(Self {
+//             packet_type: PacketTypes::Ordered,
+//             is_fragment,
+//         })
+//     }
+// }
 
-        Ok(Self {
-            packet_type: PacketTypes::Ordered,
-            is_fragment,
-        })
-    }
-}
-
-struct ReliableOrderedHeader {}
+// struct ReliableOrderedHeader {}
