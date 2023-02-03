@@ -44,7 +44,8 @@ impl Connection {
         }
     }
 
-    fn handle_incomming(&mut self, rx: &[u8], protocol_version: u64) {
+    fn handle_incommng(&mut self, rx: &[u8], protocol_version: u64) {
+        let packet = Packet::deserialize(rx, protocol_version);
         // let mut cursor = Cursor::new(rx);
         // let standard_header = StandardHeader::with_checksum(cursor, packet_hash);
         // if standard_header.is_err() {

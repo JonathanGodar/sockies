@@ -6,6 +6,7 @@ use std::{
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crc::{Crc, CRC_32_CKSUM};
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct Packet {
     pub payload: Box<[u8]>,
     pub fragment_header: Option<FragmentHeader>,
@@ -16,30 +17,30 @@ pub struct Packet {
     pub delivery_guarantee: DeliveryGuarantee,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum OrderingGuarantee {
     Ordered(OrderingHeader),
     Unordered,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DeliveryGuarantee {
     Reliable(ReliableHeader),
     Unreliable,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct FragmentHeader {
     frag_count: u8,
     frag_id: u8,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct OrderingHeader {
     channel: u16,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ReliableHeader {
     // seq_num: u16,
     ack_num: u16,
@@ -54,9 +55,9 @@ pub struct ReliableHeader {
 // }
 
 // enum PacketTypes {
-// Unreliable = 0b01,
-// Reliable = 0b10,
-// Ordered = 0b11,
+//     Unreliable = 0b01,
+//     Reliable = 0b10,
+//     Ordered = 0b11,
 // }
 
 // impl TryFrom<u8> for PacketTypes {
@@ -78,6 +79,7 @@ bitflags::bitflags! {
         const IS_FRAGMENT = (1 << 0);
         const IS_ORDERED = (1 << 1);
         const IS_RELIABLE = (1 << 2);
+        // const IS_HEARBET = (1 << 3);
     }
 }
 
@@ -93,7 +95,7 @@ impl Packet {
         digest.finalize()
     }
 
-    fn deserialize(bytes: Box<[u8]>, proto_version: u64) -> std::io::Result<Self> {
+    pub fn deserialize(bytes: &[u8], proto_version: u64) -> std::io::Result<Self> {
         let mut cursor = Cursor::new(bytes);
         let checksum = cursor.read_u32::<LittleEndian>()?;
 
@@ -143,7 +145,7 @@ impl Packet {
         }
 
         let pos = cursor.position() as usize;
-        let mut payload = cursor.into_inner().into_vec();
+        let mut payload: Vec<&u8> = bytes.copy_within(src, dest);
         payload.drain(..pos);
 
         packet.payload = payload.into_boxed_slice();
@@ -171,6 +173,8 @@ impl Packet {
             builder.write_u8(fragment_header.frag_count)?;
         }
 
+        builder.extend_from_slice(&self.payload);
+
         let checksum = Packet::caluclate_checksum(&builder[mem::size_of::<u32>()..], proto_version);
         builder.splice(..mem::size_of::<u32>(), checksum.to_le_bytes());
         Ok(builder.into_boxed_slice())
@@ -185,6 +189,7 @@ impl Packet {
                 | PacketFlags::IS_FRAGMENT.bits() * (self.fragment_header.is_some()) as u8,
         )
     }
+
     // fn read_channel(mut cursor: Cursor<&[u8]>) -> std::io::Result<u32> {
     //     let mut channel: u32 = 0;
     //     for i in 0..4 {
@@ -203,10 +208,79 @@ impl Packet {
 }
 mod test {
     use super::*;
+    const PROTO_VERSION: u64 = 1;
+
+    fn create_simple_packet() -> Packet {
+        Packet {
+            delivery_guarantee: DeliveryGuarantee::Unreliable,
+            fragment_header: None,
+            ordering_guarantee: OrderingGuarantee::Unordered,
+            packet_id: 1,
+            payload: vec![23, 24, 32, 12].into_boxed_slice(),
+        }
+    }
+
+    fn assert_serialized_packet_is_same(packet: Packet, version: u64) {
+        assert!(
+            matches!(
+                Packet::deserialize(packet.serialize(version).unwrap(), version),
+                Ok(packet)
+            )
+        )
+    }
 
     #[test]
-    fn can_serialize_and_deserialize_simple_package() {}
+    fn can_serialize_and_deserialize_simple_package() {
+        let packet = create_simple_packet();
+        
+        let serialized = packet.serialize(PROTO_VERSION).unwrap();
+        let deserialized = Packet::deserialize(serialized, PROTO_VERSION).unwrap();
+        assert_eq!(packet, deserialized);
+    }
+
+    #[test]
+    fn does_not_accept_corrupt_package(){
+        let packet = create_simple_packet();
+        let mut serialized = packet.serialize(PROTO_VERSION).unwrap();
+        
+        for replacement_val in 0..(mem::size_of::<u8>() * 8){
+            for i in 0..serialized.len() {
+                let prev = serialized[i];
+                if prev == replacement_val as u8 {
+                    continue;
+                } 
+                serialized[i] = replacement_val as u8;
+                assert!(Packet::deserialize(serialized.clone(), PROTO_VERSION).is_err());
+                serialized[i] = prev;
+            }
+        }
+    }
+
+    #[test]
+    fn does_not_accept_packet_with_wrong_version(){
+        let packet = create_simple_packet();
+        let serialized = packet.serialize(PROTO_VERSION).unwrap();
+        assert!(Packet::deserialize(serialized, PROTO_VERSION + 1).is_err());
+    }
+
+    #[test]
+    fn can_serialize_and_deserialize_reliable_pack(){
+        let mut packet = create_simple_packet();
+        packet.delivery_guarantee = DeliveryGuarantee::Reliable(ReliableHeader { ack_num: 12, ack_bits: 0b00101 });
+
+        assert_serialized_packet_is_same(packet, PROTO_VERSION);
+    }
+
+    #[test]
+    fn can_serialize_and_deserialize_frag_reliable_pack(){
+        let mut packet = create_simple_packet();
+        packet.delivery_guarantee = DeliveryGuarantee::Reliable(ReliableHeader { ack_num: 12, ack_bits: 0b00101 });
+        packet.fragment_header = Some(FragmentHeader { frag_count: 23, frag_id: 3 });
+
+        assert_serialized_packet_is_same(packet, PROTO_VERSION);
+    }
 }
+
 
 // mod test {
 //     use super::*;
