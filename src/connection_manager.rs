@@ -1,5 +1,7 @@
 use crate::{
-    packet::{self, Packet},
+    headers::ReliableHeader,
+    // headers::reliable_header::ReliableHeader,
+    packet::{self, OrderingHeader, Packet},
     transport::transport_trait::Transport,
 };
 use crc::{Crc, CRC_32_CKSUM};
@@ -26,8 +28,15 @@ pub struct Connection {
 
     seq: u16,
     ack: u16,
-    ack_bits: u16,
+    ack_bits: u32,
+
+
+    seq_buffer: [],
+    // Packets that the other peer has not acked
+    unacked_packets: HashMap<u16, Packet>,
 }
+
+st:
 
 impl Connection {
     fn new(sock_addr: SocketAddr) -> Self {
@@ -41,24 +50,60 @@ impl Connection {
             seq: 0,
             ack: 0,
             ack_bits: 0,
+            unacked_packets: HashMap::new(),
         }
     }
 
-    fn handle_incommng(&mut self, rx: &[u8], protocol_version: u64) {
+    fn handle_incomming(&mut self, rx: &[u8], protocol_version: u64) {
         let packet = Packet::deserialize(rx, protocol_version);
-        // let mut cursor = Cursor::new(rx);
-        // let standard_header = StandardHeader::with_checksum(cursor, packet_hash);
-        // if standard_header.is_err() {
-        //     return;
-        // }
+        if packet.is_err() {
+            return;
+        }
+        let packet = packet.unwrap();
 
-        // let standard_header = standard_header.unwrap();
-        // let packet_type = standard_header.packet_type;
+        match packet.delivery_guarantee {
+            packet::DeliveryGuarantee::Reliable(header) => {
+                self.handle_reliable(packet.packet_id, header);
+            }
+            packet::DeliveryGuarantee::Unreliable => {}
+        }
 
-        // // match packet_type {
-        // //     // PacketTypes::Orderedj //     // PacketTypes::Fragment {
-        // //     // }
-        // // }
+    }
+
+    fn handle_reliable(&mut self, packet_id: u16, reliable_header: ReliableHeader) {
+        for acked in reliable_header.get_acked_packages() {
+            self.unacked_packets.remove(&acked);
+        }
+
+        let shift = packet_id as i32 - self.ack as i32;
+
+        if shift < -32 {
+            todo!();
+        } else if shift < 0 {
+            self.ack_bits |= 1 << (-shift - 1);
+        } else if shift > 0 {
+            self.ack += shift as u16;
+            self.ack_bits <<= shift;
+
+            let prev_ack_num_in_ack_bits = 1 << (shift - 1);
+            self.ack_bits |= prev_ack_num_in_ack_bits;
+        }
+    }
+
+    fn create_reliable(&mut self, payload: Vec<u8>) -> Packet {
+        Packet {
+            payload,
+            packet_id: {
+                self.seq += 1;
+                self.seq - 1
+            },
+            fragment_header: None,
+            ordering_guarantee: packet::OrderingGuarantee::Unordered,
+            delivery_guarantee: packet::DeliveryGuarantee::Reliable(ReliableHeader {
+                ack_num: self.ack,
+                ack_bits: self.ack_bits,
+            }),
+        }
     }
 }
 

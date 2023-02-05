@@ -6,9 +6,11 @@ use std::{
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crc::{Crc, CRC_32_CKSUM};
 
+use crate::headers::ReliableHeader;
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Packet {
-    pub payload: Box<[u8]>,
+    pub payload: Vec<u8>,
     pub fragment_header: Option<FragmentHeader>,
 
     pub packet_id: u16,
@@ -37,14 +39,7 @@ pub struct FragmentHeader {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct OrderingHeader {
-    channel: u16,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct ReliableHeader {
-    // seq_num: u16,
-    ack_num: u16,
-    ack_bits: u16,
+    pub channel: u16,
 }
 
 // pub enum OrderingType {
@@ -122,7 +117,7 @@ impl Packet {
 
         if flags.contains(PacketFlags::IS_RELIABLE) {
             let ack_num = cursor.read_u16::<LittleEndian>()?;
-            let ack_bits = cursor.read_u16::<LittleEndian>()?;
+            let ack_bits = cursor.read_u32::<LittleEndian>()?;
 
             packet.delivery_guarantee =
                 DeliveryGuarantee::Reliable(ReliableHeader { ack_num, ack_bits });
@@ -145,10 +140,9 @@ impl Packet {
         }
 
         let pos = cursor.position() as usize;
-        let mut payload: Vec<&u8> = bytes.copy_within(src, dest);
-        payload.drain(..pos);
+        let payload = cursor.into_inner().iter().cloned().skip(pos).collect();
 
-        packet.payload = payload.into_boxed_slice();
+        packet.payload = payload;
         Ok(packet)
     }
 
@@ -161,7 +155,7 @@ impl Packet {
 
         if let DeliveryGuarantee::Reliable(reliable_header) = &self.delivery_guarantee {
             builder.write_u16::<LittleEndian>(reliable_header.ack_num)?;
-            builder.write_u16::<LittleEndian>(reliable_header.ack_bits)?;
+            builder.write_u32::<LittleEndian>(reliable_header.ack_bits)?;
         }
 
         if let OrderingGuarantee::Ordered(ordered_header) = &self.ordering_guarantee {
@@ -189,22 +183,6 @@ impl Packet {
                 | PacketFlags::IS_FRAGMENT.bits() * (self.fragment_header.is_some()) as u8,
         )
     }
-
-    // fn read_channel(mut cursor: Cursor<&[u8]>) -> std::io::Result<u32> {
-    //     let mut channel: u32 = 0;
-    //     for i in 0..4 {
-    //         channel <<= 8;
-    //         let read = cursor.read_u8()?;
-    //         channel += read as u32;
-    //         if read & (1 << 7) == 0 {
-    //             break;
-    //         }
-    //     }
-
-    //     Ok(channel)
-    // }
-
-    // fn write_channel()
 }
 mod test {
     use super::*;
@@ -216,71 +194,77 @@ mod test {
             fragment_header: None,
             ordering_guarantee: OrderingGuarantee::Unordered,
             packet_id: 1,
-            payload: vec![23, 24, 32, 12].into_boxed_slice(),
+            payload: vec![23, 24, 32, 12],
         }
     }
 
     fn assert_serialized_packet_is_same(packet: Packet, version: u64) {
-        assert!(
-            matches!(
-                Packet::deserialize(packet.serialize(version).unwrap(), version),
-                Ok(packet)
-            )
-        )
+        assert!(matches!(
+            Packet::deserialize(&packet.serialize(version).unwrap(), version),
+            Ok(packet)
+        ))
     }
 
     #[test]
     fn can_serialize_and_deserialize_simple_package() {
         let packet = create_simple_packet();
-        
+
         let serialized = packet.serialize(PROTO_VERSION).unwrap();
-        let deserialized = Packet::deserialize(serialized, PROTO_VERSION).unwrap();
+        let deserialized = Packet::deserialize(&serialized, PROTO_VERSION).unwrap();
         assert_eq!(packet, deserialized);
     }
 
     #[test]
-    fn does_not_accept_corrupt_package(){
+    fn does_not_accept_corrupt_package() {
         let packet = create_simple_packet();
         let mut serialized = packet.serialize(PROTO_VERSION).unwrap();
-        
-        for replacement_val in 0..(mem::size_of::<u8>() * 8){
+
+        for replacement_val in 0..(mem::size_of::<u8>() * 8) {
             for i in 0..serialized.len() {
                 let prev = serialized[i];
                 if prev == replacement_val as u8 {
                     continue;
-                } 
+                }
                 serialized[i] = replacement_val as u8;
-                assert!(Packet::deserialize(serialized.clone(), PROTO_VERSION).is_err());
+                assert!(Packet::deserialize(&serialized, PROTO_VERSION).is_err());
                 serialized[i] = prev;
             }
         }
     }
 
     #[test]
-    fn does_not_accept_packet_with_wrong_version(){
+    fn does_not_accept_packet_with_wrong_version() {
         let packet = create_simple_packet();
         let serialized = packet.serialize(PROTO_VERSION).unwrap();
-        assert!(Packet::deserialize(serialized, PROTO_VERSION + 1).is_err());
+        assert!(Packet::deserialize(&serialized, PROTO_VERSION + 1).is_err());
     }
 
     #[test]
-    fn can_serialize_and_deserialize_reliable_pack(){
+    fn can_serialize_and_deserialize_reliable_pack() {
         let mut packet = create_simple_packet();
-        packet.delivery_guarantee = DeliveryGuarantee::Reliable(ReliableHeader { ack_num: 12, ack_bits: 0b00101 });
+        packet.delivery_guarantee = DeliveryGuarantee::Reliable(ReliableHeader {
+            ack_num: 12,
+            ack_bits: 0b00101,
+        });
 
         assert_serialized_packet_is_same(packet, PROTO_VERSION);
     }
 
     #[test]
-    fn can_serialize_and_deserialize_frag_reliable_pack(){
+    fn can_serialize_and_deserialize_frag_reliable_pack() {
         let mut packet = create_simple_packet();
-        packet.delivery_guarantee = DeliveryGuarantee::Reliable(ReliableHeader { ack_num: 12, ack_bits: 0b00101 });
-        packet.fragment_header = Some(FragmentHeader { frag_count: 23, frag_id: 3 });
+        packet.delivery_guarantee = DeliveryGuarantee::Reliable(ReliableHeader {
+            ack_num: 12,
+            ack_bits: 0b00101,
+        });
+        packet.fragment_header = Some(FragmentHeader {
+            frag_count: 23,
+            frag_id: 3,
+        });
 
         assert_serialized_packet_is_same(packet, PROTO_VERSION);
     }
 }
-
 
 // mod test {
 //     use super::*;
